@@ -598,47 +598,57 @@ function addWeatherButtons() {
 
 async function checkWeather(which) {
   var inputId = which === 'origin' ? 'sOrigin' : 'sDest';
-  var location = document.getElementById(inputId) ? document.getElementById(inputId).value.trim() : '';
+  var inputEl = document.getElementById(inputId);
+  var location = inputEl ? inputEl.value.trim() : '';
   if(!location) {
-    var inputEl2 = document.getElementById(inputId);
-    if(inputEl2) { inputEl2.style.borderColor='#dc2626'; setTimeout(function(){inputEl2.style.borderColor='';},2000); }
+    if(inputEl) { inputEl.style.borderColor='#dc2626'; setTimeout(function(){inputEl.style.borderColor='';},2000); }
     showStatus('Enter a location first', 'err'); return;
   }
   showStatus('Checking weather in ' + location + '...', 'info');
   try {
-    var resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        model:'claude-sonnet-4-20250514', max_tokens:200,
-        tools:[{type:'web_search_20250305',name:'web_search'}],
-        system:'Return ONLY raw JSON (no markdown): {"temp_c":number,"condition":string}',
-        messages:[{role:'user',content:'Current weather in ' + location + '. JSON only.'}]
-      })
-    });
-    var data = await resp.json();
-    var txt = (data.content||[]).filter(function(b){return b.type==='text';}).map(function(b){return b.text;}).join('');
-    var w = null;
-    try { var m = txt.replace(/```json|```/g,'').trim().match(/\{[\s\S]*\}/); if(m) w = JSON.parse(m[0]); } catch(e) {}
-    if(w && w.temp_c !== undefined) {
-      var t = w.temp_c;
-      var color = t <= -10 ? '#dc2626' : t <= 0 ? '#d97706' : t >= 35 ? '#dc2626' : '#16a34a';
-      var warn = t <= -10 ? ' ⚠️ Extreme cold — thermal blankets ineffective' : t <= 0 ? ' ⚠️ Near freezing — passive packaging at risk' : t >= 35 ? ' ⚠️ Extreme heat — gel packs melt faster' : ' ✓ Normal conditions';
-      if(which === 'origin') window._weatherOrigin = t + '°C, ' + w.condition + ' in ' + location;
-      else window._weatherDest = t + '°C, ' + w.condition + ' in ' + location;
-      // Show inline
-      var inputEl = document.getElementById(inputId);
-      var existing = inputEl ? inputEl.parentNode.querySelector('.weather-result') : null;
-      if(inputEl && inputEl.parentNode) {
-        var wDiv = existing || document.createElement('div');
-        wDiv.className = 'weather-result';
-        wDiv.style.cssText = 'font-size:11px;margin-top:4px;font-weight:500;color:'+color;
-        wDiv.textContent = t + '°C — ' + w.condition + warn;
-        if(!existing) inputEl.parentNode.parentNode.appendChild(wDiv);
-      }
-      showStatus('Weather loaded: ' + t + '°C in ' + location, 'ok');
-    } else {
-      showStatus('Could not get weather for ' + location, 'err');
+    // Step 1: Geocode using Open-Meteo (free, no API key, no CORS)
+    var geoResp = await fetch('https://geocoding-api.open-meteo.com/v1/search?name=' + encodeURIComponent(location) + '&count=1&language=en&format=json');
+    var geoData = await geoResp.json();
+    if(!geoData.results || !geoData.results.length) {
+      showStatus('Location not found: ' + location, 'err'); return;
     }
+    var geo = geoData.results[0];
+    var lat = geo.latitude, lon = geo.longitude;
+    var placeName = geo.name + (geo.country ? ', ' + geo.country : '');
+
+    // Step 2: Get weather from Open-Meteo (free, no API key)
+    var wxResp = await fetch('https://api.open-meteo.com/v1/forecast?latitude=' + lat + '&longitude=' + lon + '&current=temperature_2m,weathercode,apparent_temperature&timezone=auto');
+    var wxData = await wxResp.json();
+    var t = Math.round(wxData.current.temperature_2m);
+    var feels = Math.round(wxData.current.apparent_temperature);
+
+    // WMO weather code to condition
+    var code = wxData.current.weathercode;
+    var condition = code === 0 ? 'Clear sky' : code <= 3 ? 'Partly cloudy' : code <= 9 ? 'Overcast' : code <= 19 ? 'Foggy' : code <= 29 ? 'Drizzle' : code <= 39 ? 'Rain' : code <= 49 ? 'Freezing rain' : code <= 59 ? 'Snow' : code <= 69 ? 'Heavy snow' : code <= 79 ? 'Sleet' : code <= 82 ? 'Rain showers' : code <= 86 ? 'Snow showers' : 'Thunderstorm';
+
+    var color = t <= -10 ? '#dc2626' : t <= 0 ? '#d97706' : t >= 35 ? '#dc2626' : t >= 28 ? '#d97706' : '#16a34a';
+    var warn = t <= -10 ? ' ⚠️ Extreme cold — thermal blankets ineffective, use active or dry ice shipper'
+      : t <= 0 ? ' ⚠️ Near freezing — passive packaging performance reduced'
+      : t >= 35 ? ' ⚠️ Extreme heat — gel packs melt faster, use high-performance shipper'
+      : t >= 28 ? ' ⚠️ Hot — monitor passive packaging performance'
+      : ' ✓ Normal conditions';
+
+    if(which === 'origin') window._weatherOrigin = t + '°C, ' + condition + ' in ' + placeName;
+    else window._weatherDest = t + '°C, ' + condition + ' in ' + placeName;
+
+    // Show inline below the input
+    var wrap = inputEl ? inputEl.parentNode : null;
+    var container = wrap ? wrap.parentNode : null;
+    if(container) {
+      var existing = container.querySelector('.weather-result');
+      var wDiv = existing || document.createElement('div');
+      wDiv.className = 'weather-result';
+      wDiv.style.cssText = 'font-size:11px;margin-top:5px;font-weight:500;padding:5px 10px;border-radius:6px;background:' + (t <= 0 || t >= 35 ? '#fef2f2' : '#f0fdf4') + ';border:1px solid ' + (t <= 0 || t >= 35 ? '#fecaca' : '#bbf7d0');
+      wDiv.innerHTML = '<span style="color:' + color + '">' + t + '°C (feels ' + feels + '°C) — ' + condition + ' in ' + placeName + '</span>'
+        + '<br><span style="color:' + color + ';font-size:10px">' + warn + '</span>';
+      if(!existing) container.appendChild(wDiv);
+    }
+    showStatus('Weather: ' + t + '°C in ' + placeName, 'ok');
   } catch(e) { showStatus('Weather error: ' + e.message, 'err'); }
 }
 
@@ -1776,47 +1786,57 @@ function buildFormHTML() {
 
 async function checkWeather(which) {
   var inputId = which === 'origin' ? 'sOrigin' : 'sDest';
-  var location = document.getElementById(inputId) ? document.getElementById(inputId).value.trim() : '';
+  var inputEl = document.getElementById(inputId);
+  var location = inputEl ? inputEl.value.trim() : '';
   if(!location) {
-    var inputEl2 = document.getElementById(inputId);
-    if(inputEl2) { inputEl2.style.borderColor='#dc2626'; setTimeout(function(){inputEl2.style.borderColor='';},2000); }
+    if(inputEl) { inputEl.style.borderColor='#dc2626'; setTimeout(function(){inputEl.style.borderColor='';},2000); }
     showStatus('Enter a location first', 'err'); return;
   }
   showStatus('Checking weather in ' + location + '...', 'info');
   try {
-    var resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        model:'claude-sonnet-4-20250514', max_tokens:200,
-        tools:[{type:'web_search_20250305',name:'web_search'}],
-        system:'Return ONLY raw JSON (no markdown): {"temp_c":number,"condition":string}',
-        messages:[{role:'user',content:'Current weather in ' + location + '. JSON only.'}]
-      })
-    });
-    var data = await resp.json();
-    var txt = (data.content||[]).filter(function(b){return b.type==='text';}).map(function(b){return b.text;}).join('');
-    var w = null;
-    try { var m = txt.replace(/```json|```/g,'').trim().match(/\{[\s\S]*\}/); if(m) w = JSON.parse(m[0]); } catch(e) {}
-    if(w && w.temp_c !== undefined) {
-      var t = w.temp_c;
-      var color = t <= -10 ? '#dc2626' : t <= 0 ? '#d97706' : t >= 35 ? '#dc2626' : '#16a34a';
-      var warn = t <= -10 ? ' ⚠️ Extreme cold — thermal blankets ineffective' : t <= 0 ? ' ⚠️ Near freezing — passive packaging at risk' : t >= 35 ? ' ⚠️ Extreme heat — gel packs melt faster' : ' ✓ Normal conditions';
-      if(which === 'origin') window._weatherOrigin = t + '°C, ' + w.condition + ' in ' + location;
-      else window._weatherDest = t + '°C, ' + w.condition + ' in ' + location;
-      // Show inline
-      var inputEl = document.getElementById(inputId);
-      var existing = inputEl ? inputEl.parentNode.querySelector('.weather-result') : null;
-      if(inputEl && inputEl.parentNode) {
-        var wDiv = existing || document.createElement('div');
-        wDiv.className = 'weather-result';
-        wDiv.style.cssText = 'font-size:11px;margin-top:4px;font-weight:500;color:'+color;
-        wDiv.textContent = t + '°C — ' + w.condition + warn;
-        if(!existing) inputEl.parentNode.parentNode.appendChild(wDiv);
-      }
-      showStatus('Weather loaded: ' + t + '°C in ' + location, 'ok');
-    } else {
-      showStatus('Could not get weather for ' + location, 'err');
+    // Step 1: Geocode using Open-Meteo (free, no API key, no CORS)
+    var geoResp = await fetch('https://geocoding-api.open-meteo.com/v1/search?name=' + encodeURIComponent(location) + '&count=1&language=en&format=json');
+    var geoData = await geoResp.json();
+    if(!geoData.results || !geoData.results.length) {
+      showStatus('Location not found: ' + location, 'err'); return;
     }
+    var geo = geoData.results[0];
+    var lat = geo.latitude, lon = geo.longitude;
+    var placeName = geo.name + (geo.country ? ', ' + geo.country : '');
+
+    // Step 2: Get weather from Open-Meteo (free, no API key)
+    var wxResp = await fetch('https://api.open-meteo.com/v1/forecast?latitude=' + lat + '&longitude=' + lon + '&current=temperature_2m,weathercode,apparent_temperature&timezone=auto');
+    var wxData = await wxResp.json();
+    var t = Math.round(wxData.current.temperature_2m);
+    var feels = Math.round(wxData.current.apparent_temperature);
+
+    // WMO weather code to condition
+    var code = wxData.current.weathercode;
+    var condition = code === 0 ? 'Clear sky' : code <= 3 ? 'Partly cloudy' : code <= 9 ? 'Overcast' : code <= 19 ? 'Foggy' : code <= 29 ? 'Drizzle' : code <= 39 ? 'Rain' : code <= 49 ? 'Freezing rain' : code <= 59 ? 'Snow' : code <= 69 ? 'Heavy snow' : code <= 79 ? 'Sleet' : code <= 82 ? 'Rain showers' : code <= 86 ? 'Snow showers' : 'Thunderstorm';
+
+    var color = t <= -10 ? '#dc2626' : t <= 0 ? '#d97706' : t >= 35 ? '#dc2626' : t >= 28 ? '#d97706' : '#16a34a';
+    var warn = t <= -10 ? ' ⚠️ Extreme cold — thermal blankets ineffective, use active or dry ice shipper'
+      : t <= 0 ? ' ⚠️ Near freezing — passive packaging performance reduced'
+      : t >= 35 ? ' ⚠️ Extreme heat — gel packs melt faster, use high-performance shipper'
+      : t >= 28 ? ' ⚠️ Hot — monitor passive packaging performance'
+      : ' ✓ Normal conditions';
+
+    if(which === 'origin') window._weatherOrigin = t + '°C, ' + condition + ' in ' + placeName;
+    else window._weatherDest = t + '°C, ' + condition + ' in ' + placeName;
+
+    // Show inline below the input
+    var wrap = inputEl ? inputEl.parentNode : null;
+    var container = wrap ? wrap.parentNode : null;
+    if(container) {
+      var existing = container.querySelector('.weather-result');
+      var wDiv = existing || document.createElement('div');
+      wDiv.className = 'weather-result';
+      wDiv.style.cssText = 'font-size:11px;margin-top:5px;font-weight:500;padding:5px 10px;border-radius:6px;background:' + (t <= 0 || t >= 35 ? '#fef2f2' : '#f0fdf4') + ';border:1px solid ' + (t <= 0 || t >= 35 ? '#fecaca' : '#bbf7d0');
+      wDiv.innerHTML = '<span style="color:' + color + '">' + t + '°C (feels ' + feels + '°C) — ' + condition + ' in ' + placeName + '</span>'
+        + '<br><span style="color:' + color + ';font-size:10px">' + warn + '</span>';
+      if(!existing) container.appendChild(wDiv);
+    }
+    showStatus('Weather: ' + t + '°C in ' + placeName, 'ok');
   } catch(e) { showStatus('Weather error: ' + e.message, 'err'); }
 }
 
